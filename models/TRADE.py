@@ -37,7 +37,8 @@ class TRADE(nn.Module):
         self.cross_entorpy = nn.CrossEntropyLoss()
 
         self.encoder = EncoderRNN(self.lang.n_words, hidden_size, self.dropout)
-        self.decoder = Generator(self.lang, self.encoder.embedding, self.lang.n_words, hidden_size, self.dropout, self.slots, self.nb_gate) 
+        self.decoder = Generator(self.lang, self.encoder.embedding, self.lang.n_words, hidden_size,
+                                 self.dropout, self.slots, self.nb_gate)
         
         if path:
             if USE_CUDA:
@@ -135,8 +136,10 @@ class TRADE(nn.Module):
         encoded_outputs, encoded_hidden = self.encoder(story.transpose(0, 1), data['context_len'])
 
         # Get the words that can be copy from the memory
+        # why change batch_size?
         batch_size = len(data['context_len'])
         self.copy_list = data['context_plain']
+        # todo 这句话需要好好理解
         max_res_len = data['generate_y'].size(2) if self.encoder.training else 10
         all_point_outputs, all_gate_outputs, words_point_out, words_class_out = self.decoder.forward(batch_size, \
             encoded_hidden, encoded_outputs, data['context_len'], story, max_res_len, data['generate_y'], \
@@ -342,7 +345,7 @@ class Generator(nn.Module):
         self.dropout_layer = nn.Dropout(dropout)
         self.gru = nn.GRU(hidden_size, hidden_size, dropout=dropout)
         self.nb_gate = nb_gate
-        self.hidden_size = hidden_size
+        self.hidden_size = hidden_size # todo hidden_size is different from TRADE model?
         self.W_ratio = nn.Linear(3*hidden_size, 1)
         self.softmax = nn.Softmax(dim=1)
         self.sigmoid = nn.Sigmoid()
@@ -360,7 +363,8 @@ class Generator(nn.Module):
         self.Slot_emb = nn.Embedding(len(self.slot_w2i), hidden_size)
         self.Slot_emb.weight.data.normal_(0, 0.1)
 
-    def forward(self, batch_size, encoded_hidden, encoded_outputs, encoded_lens, story, max_res_len, target_batches, use_teacher_forcing, slot_temp):
+    def forward(self, batch_size, encoded_hidden, encoded_outputs, encoded_lens, story,
+                max_res_len, target_batches, use_teacher_forcing, slot_temp):
         all_point_outputs = torch.zeros(len(slot_temp), batch_size, max_res_len, self.vocab_size)
         all_gate_outputs = torch.zeros(len(slot_temp), batch_size, self.nb_gate)
         if USE_CUDA: 
@@ -393,7 +397,7 @@ class Generator(nn.Module):
                 slot_emb_arr = torch.cat((slot_emb_arr, slot_emb_exp), dim=0)
 
         if args["parallel_decode"]:
-            # Compute pointer-generator output, puting all (domain, slot) in one batch
+            # Compute pointer-generator output, putting all (domain, slot) in one batch
             decoder_input = self.dropout_layer(slot_emb_arr).view(-1, self.hidden_size) # (batch*|slot|) * emb
             hidden = encoded_hidden.repeat(1, len(slot_temp), 1) # 1 * (batch*|slot|) * emb
             words_point_out = [[] for i in range(len(slot_temp))]
@@ -437,14 +441,16 @@ class Generator(nn.Module):
             # Compute pointer-generator output, decoding each (domain, slot) one-by-one
             words_point_out = []
             counter = 0
-            for slot in slot_temp:
+            for slot in slot_temp: # slot_temp --> slot_train, slot_dev, slot_test
                 hidden = encoded_hidden
                 words = []
                 slot_emb = slot_emb_dict[slot]
+                # todo dropout here?
                 decoder_input = self.dropout_layer(slot_emb).expand(batch_size, self.hidden_size)
-                for wi in range(max_res_len):
-                    dec_state, hidden = self.gru(decoder_input.expand_as(hidden), hidden)
-                    context_vec, logits, prob = self.attend(encoded_outputs, hidden.squeeze(0), encoded_lens)
+                for wi in range(max_res_len):# max_res_len=data['generate_y'].size(2)
+                    # gru is not GRUCell, it's GRU layer
+                    dec_state, hidden = self.gru(decoder_input.expand_as(hidden), hidden) # expand_as用的好
+                    context_vec, logits, prob = self.attend(encoded_outputs, hidden.squeeze(0), encoded_lens) # encoded_lens?
                     if wi == 0: 
                         all_gate_outputs[counter] = self.W_gate(context_vec)
                     p_vocab = self.attend_vocab(self.embedding.weight, hidden.squeeze(0))
@@ -452,7 +458,8 @@ class Generator(nn.Module):
                     vocab_pointer_switches = self.sigmoid(self.W_ratio(p_gen_vec))
                     p_context_ptr = torch.zeros(p_vocab.size())
                     if USE_CUDA: p_context_ptr = p_context_ptr.cuda()
-                    p_context_ptr.scatter_add_(1, story, prob)
+                    # todo p_context_ptr seems different from paper!!
+                    p_context_ptr.scatter_add_(1, story, prob) # scatter_add_
                     final_p_vocab = (1 - vocab_pointer_switches).expand_as(p_context_ptr) * p_context_ptr + \
                                     vocab_pointer_switches.expand_as(p_context_ptr) * p_vocab
                     pred_word = torch.argmax(final_p_vocab, dim=1)

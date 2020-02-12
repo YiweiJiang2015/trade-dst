@@ -40,7 +40,7 @@ for epoch in range(200):
     # Run the train function
     pbar = tqdm(enumerate(train),total=len(train))
     for i, data in pbar:
-        model.train_batch(data, int(args['clip']), SLOTS_LIST[1], reset=(i==0))
+        model.train_batch(data, int(args['clip']), SLOTS_LIST[1], reset=(i==0)) # SLOTS_LISTS[1]-->SLOT_TRAIN
         model.optimize(args['clip'])
         pbar.set_description(model.print_loss())
         # print(data)

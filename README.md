@@ -1,3 +1,8 @@
+### Forking notes
+1. Add more annotations in codes to make them easier to understand, especially _utils_multiWOZ_DST.py_
+2. Complete blank args in _config.py_ so that you can debug immediately after cloning it. 
+
+# Original doc
 ## TRADE Multi-Domain and Unseen-Domain Dialogue State Tracking
 <img src="plot/pytorch-logo-dark.png" width="10%"> [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) 
 

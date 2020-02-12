@@ -25,6 +25,9 @@ from .fix_label import *
 EXPERIMENT_DOMAINS = ["hotel", "train", "restaurant", "attraction", "taxi"]
 
 class Lang:
+    """
+    This may be a overall vocabulary for all tokens occurring in the data files.
+    """
     def __init__(self):
         self.word2index = {}
         self.index2word = {PAD_token: "PAD", SOS_token: "SOS", EOS_token: "EOS", UNK_token: 'UNK'}
@@ -62,6 +65,7 @@ class Dataset(data.Dataset):
     def __init__(self, data_info, src_word2id, trg_word2id, sequicity, mem_word2id):
         """Reads source and target sequences from txt files."""
         self.ID = data_info['ID']
+        # self.domains = data_info['domains'] # this is omitted for purpose
         self.turn_domain = data_info['turn_domain']
         self.turn_id = data_info['turn_id']
         self.dialog_history = data_info['dialog_history']
@@ -76,7 +80,7 @@ class Dataset(data.Dataset):
         self.mem_word2id = mem_word2id
     
     def __getitem__(self, index):
-        """Returns one data pair (source and target)."""
+        """Returns one data instance (source and target)."""
         ID = self.ID[index]
         turn_id = self.turn_id[index]
         turn_belief = self.turn_belief[index]
@@ -84,9 +88,9 @@ class Dataset(data.Dataset):
         turn_uttr = self.turn_uttr[index]
         turn_domain = self.preprocess_domain(self.turn_domain[index])
         generate_y = self.generate_y[index]
-        generate_y = self.preprocess_slot(generate_y, self.trg_word2id)
+        generate_y = self.preprocess_slot_value(generate_y, self.trg_word2id)
         context = self.dialog_history[index] 
-        context = self.preprocess(context, self.src_word2id)
+        context = self.preprocess_context(context, self.src_word2id)
         context_plain = self.dialog_history[index]
         
         item_info = {
@@ -105,13 +109,13 @@ class Dataset(data.Dataset):
     def __len__(self):
         return self.num_total_seqs
     
-    def preprocess(self, sequence, word2idx):
+    def preprocess_context(self, sequence, word2idx):
         """Converts words to ids."""
         story = [word2idx[word] if word in word2idx else UNK_token for word in sequence.split()]
         story = torch.Tensor(story)
         return story
 
-    def preprocess_slot(self, sequence, word2idx):
+    def preprocess_slot_value(self, sequence, word2idx):
         """Converts words to ids."""
         story = []
         for value in sequence:
@@ -121,12 +125,16 @@ class Dataset(data.Dataset):
         return story
 
     def preprocess_memory(self, sequence, word2idx):
-        """Converts words to ids."""
+        """
+        Converts words to ids.
+        Not used..
+        """
         story = []
         for value in sequence:
             d, s, v = value
             s = s.replace("book","").strip()
             # separate each word in value to different memory slot
+            # todo this function is related to mem_lang
             for wi, vw in enumerate(v.split()):
                 idx = [word2idx[word] if word in word2idx else UNK_token for word in [d, s, "t{}".format(wi), vw]]
                 story.append(idx)
@@ -139,9 +147,13 @@ class Dataset(data.Dataset):
 
 
 def collate_fn(data):
-    def merge(sequences):
+    """
+    校对函数, passed to DatasetLoader
+    Accomplish padding
+    """
+    def pad(sequences):
         '''
-        merge from batch * sent_len to batch * max_len 
+        pad from batch * sent_len to batch * max_len
         '''
         lengths = [len(seq) for seq in sequences]
         max_len = 1 if max(lengths)==0 else max(lengths)
@@ -152,9 +164,10 @@ def collate_fn(data):
         padded_seqs = padded_seqs.detach() #torch.tensor(padded_seqs)
         return padded_seqs, lengths
 
-    def merge_multi_response(sequences):
+    def pad_multi_response(sequences):
         '''
-        merge from batch * nb_slot * slot_len to batch * nb_slot * max_slot_len
+        convert from (batch * num_slot * slot_len) to (batch * num_slot * max_slot_len)
+        Normally, slot_len is 2 because of "None+[EOS]"
         '''
         lengths = []
         for bsz_seq in sequences:
@@ -172,7 +185,7 @@ def collate_fn(data):
         lengths = torch.tensor(lengths)
         return padded_seqs, lengths
 
-    def merge_memory(sequences):
+    def pad_memory(sequences):
         lengths = [len(seq) for seq in sequences]
         max_len = 1 if max(lengths)==0 else max(lengths) # avoid the empty belief state issue
         padded_seqs = torch.ones(len(sequences), max_len, 4).long()
@@ -188,9 +201,10 @@ def collate_fn(data):
     for key in data[0].keys():
         item_info[key] = [d[key] for d in data]
 
-    # merge sequences
-    src_seqs, src_lengths = merge(item_info['context'])
-    y_seqs, y_lengths = merge_multi_response(item_info["generate_y"])
+    # pad sequences
+    # see line 96
+    src_seqs, src_lengths = pad(item_info['context'])
+    y_seqs, y_lengths = pad_multi_response(item_info["generate_y"])
     gating_label = torch.tensor(item_info["gating_label"])
     turn_domain = torch.tensor(item_info["turn_domain"])
 
@@ -210,10 +224,24 @@ def collate_fn(data):
     return item_info
 
 def read_langs(file_name, gating_dict, SLOTS, dataset, lang, mem_lang, sequicity, training, max_line = None):
+    """
+    Better name it construct_vocab?
+    In fact, this function is the front line towards original data files.
+    The 1st step to process data files. Convert them into python data-type.
+    Params:
+        SLOTS: contain slots from train, dev and test
+        max_line: set the max number of dialogs that model deals with
+    Returns:
+        data: list of dicts, each element (one dict) is an abstract of each turn of all the dialogs.
+              So the content is very redundant. See line 322.
+        max_resp_len: the maximum length of dialog history
+        slot_temp: slot_temp is different from SLOTS if we only do experiments on specific domains
+
+    """
     print(("Reading from {}".format(file_name)))
     data = []
     max_resp_len, max_value_len = 0, 0
-    domain_counter = {} 
+    domain_counter = {}  # distribution of domain in the datafiles
     with open(file_name) as f:
         dials = json.load(f)
         # create vocab first 
@@ -227,7 +255,7 @@ def read_langs(file_name, gating_dict, SLOTS, dataset, lang, mem_lang, sequicity
             random.Random(10).shuffle(dials)
             dials = dials[:int(len(dials)*0.01*args["data_ratio"])]
         
-        cnt_lin = 1
+        cnt_lin = 1 # count the number of dialogs that have been processed
         for dial_dict in dials:
             dialog_history = ""
             last_belief_dict = {}
@@ -238,22 +266,23 @@ def read_langs(file_name, gating_dict, SLOTS, dataset, lang, mem_lang, sequicity
                 if domain not in domain_counter.keys():
                     domain_counter[domain] = 0
                 domain_counter[domain] += 1
-
-            # Unseen domain setting
+            ######
+            # Unseen domain setting for zero-shot learning
             if args["only_domain"] != "" and args["only_domain"] not in dial_dict["domains"]:
                 continue
             if (args["except_domain"] != "" and dataset == "test" and args["except_domain"] not in dial_dict["domains"]) or \
                (args["except_domain"] != "" and dataset != "test" and [args["except_domain"]] == dial_dict["domains"]): 
                 continue
-
+            ######
             # Reading data
             for ti, turn in enumerate(dial_dict["dialogue"]):
                 turn_domain = turn["domain"]
                 turn_id = turn["turn_idx"]
                 turn_uttr = turn["system_transcript"] + " ; " + turn["transcript"]
                 turn_uttr_strip = turn_uttr.strip()
-                dialog_history +=  (turn["system_transcript"] + " ; " + turn["transcript"] + " ; ")
+                dialog_history += (turn["system_transcript"] + " ; " + turn["transcript"] + " ; ")
                 source_text = dialog_history.strip()
+                '''Func below is very tricky. 0_0'''
                 turn_belief_dict = fix_general_label_error(turn["belief_state"], False, SLOTS)
 
                 # Generate domain-dependent slot list
@@ -281,9 +310,10 @@ def read_langs(file_name, gating_dict, SLOTS, dataset, lang, mem_lang, sequicity
                 class_label, generate_y, slot_mask, gating_label  = [], [], [], []
                 start_ptr_label, end_ptr_label = [], []
                 for slot in slot_temp:
-                    if slot in turn_belief_dict.keys(): 
-                        generate_y.append(turn_belief_dict[slot])
-
+                    if slot in turn_belief_dict.keys():
+                        generate_y.append(turn_belief_dict[slot]) # generate_y stores the true label of values for domain-slot!
+                                                                    # It also includes "none", so the length is fixed to len(SLOTS)
+                        '''Below is similar to the category in ProPara'''
                         if turn_belief_dict[slot] == "dontcare":
                             gating_label.append(gating_dict["dontcare"])
                         elif turn_belief_dict[slot] == "none":
@@ -291,7 +321,7 @@ def read_langs(file_name, gating_dict, SLOTS, dataset, lang, mem_lang, sequicity
                         else:
                             gating_label.append(gating_dict["ptr"])
 
-                        if max_value_len < len(turn_belief_dict[slot]):
+                        if max_value_len < len(turn_belief_dict[slot]): # max_value_len: the maximum of number of turn_belief items across all dialogs
                             max_value_len = len(turn_belief_dict[slot])
 
                     else:
@@ -309,30 +339,45 @@ def read_langs(file_name, gating_dict, SLOTS, dataset, lang, mem_lang, sequicity
                     "turn_uttr":turn_uttr_strip, 
                     'generate_y':generate_y
                     }
-                data.append(data_detail)
+                data.append(data_detail) # data_detail is appended per turn in each dialogue. len(data)=(#average turns * #dialogs)
+                                         # Each data_detail represents an primitive raw instance for training.
                 
-                if max_resp_len < len(source_text.split()):
+                if max_resp_len < len(source_text.split()): # max_resp_len: the maximum length of dialog history
                     max_resp_len = len(source_text.split())
                 
-            cnt_lin += 1
+            cnt_lin += 1 # count how many dialogs there are in the datafile
             if(max_line and cnt_lin>=max_line):
                 break
 
-    # add t{} to the lang file
+    # add t{} to the mem_lang file
+    # todo point of this operation?
     if "t{}".format(max_value_len-1) not in mem_lang.word2index.keys() and training:
         for time_i in range(max_value_len):
             mem_lang.index_words("t{}".format(time_i), 'utter')
 
     print("domain_counter", domain_counter)
-    return data, max_resp_len, slot_temp
+    return data, max_resp_len, slot_temp # slot_temp is different from SLOTS if we only do experiments on specific domains
 
 
-def get_seq(pairs, lang, mem_lang, batch_size, type, sequicity):  
+def get_seq(pairs, lang, mem_lang, batch_size, type, sequicity):
+    """
+    2nd step to process data.
+    Convert processed dialogs to PyTorch-type DataLoader.
+    Paras:
+        pairs: list, data--see fn read_langs' return
+        lang: dict
+        mem_lang: dict
+        batch_size: int
+        type: boolean, the shuffle switch, passed to DataLoader 
+        sequicity:
+    return:
+        data_loader
+    """
     if(type and args['fisher_sample']>0):
         shuffle(pairs)
         pairs = pairs[:args['fisher_sample']]
 
-    data_info = {}
+    data_info = {} # aggregate the values belonging to same keys across all elements in pairs
     data_keys = pairs[0].keys()
     for k in data_keys:
         data_info[k] = []
@@ -342,13 +387,14 @@ def get_seq(pairs, lang, mem_lang, batch_size, type, sequicity):
             data_info[k].append(pair[k]) 
 
     dataset = Dataset(data_info, lang.word2index, lang.word2index, sequicity, mem_lang.word2index)
-
+    #####
     if args["imbalance_sampler"] and type:
         data_loader = torch.utils.data.DataLoader(dataset=dataset,
                                                   batch_size=batch_size,
                                                   # shuffle=type,
                                                   collate_fn=collate_fn,
                                                   sampler=ImbalancedDatasetSampler(dataset))
+    ######
     else:
         data_loader = torch.utils.data.DataLoader(dataset=dataset,
                                                   batch_size=batch_size,
@@ -378,6 +424,24 @@ def get_slot_information(ontology):
 
 
 def prepare_data_seq(training, task="dst", sequicity=0, batch_size=100):
+    """
+    Called in myTrain.py.
+
+    Param:
+        sequicity: ??
+    return:
+        train: train_data_loader
+        dev: dev_data_loader
+        test: test_data_loader
+        test_4d: something only for trial experiment.
+        LANG: list of dicts, [lang, mem_lang]
+        SLOTS_LIST: [ALL_SLOTS, slot_train, slot_dev, slot_test].
+                    ALL_SLOTS: extracted from ontology.json file
+                    Normally, the post 3 slots are the same as ALL_SLOTS except when user specify
+                    "only domain" or "except domain" in args config
+        gating_dict: {"ptr":0, "dontcare":1, "none":2}
+        num_train_vocab: number of tokens in dict
+    """
     eval_batch = args["eval_batch"] if args["eval_batch"] else batch_size
     file_train = 'data/train_dials.json'
     file_dev = 'data/dev_dials.json'
@@ -393,8 +457,9 @@ def prepare_data_seq(training, task="dst", sequicity=0, batch_size=100):
     # load domain-slot pairs from ontology
     ontology = json.load(open("data/multi-woz/MULTIWOZ2 2/ontology.json", 'r'))
     ALL_SLOTS = get_slot_information(ontology)
-    gating_dict = {"ptr":0, "dontcare":1, "none":2}
+    gating_dict = {"ptr":0, "dontcare":1, "none":2} # this should be very useful
     # Vocabulary
+    # mem-lang dict is larger than lang dict, see line 344
     lang, mem_lang = Lang(), Lang()
     lang.index_words(ALL_SLOTS, 'slot')
     mem_lang.index_words(ALL_SLOTS, 'slot')
@@ -403,12 +468,16 @@ def prepare_data_seq(training, task="dst", sequicity=0, batch_size=100):
 
     if training:
         pair_train, train_max_len, slot_train = read_langs(file_train, gating_dict, ALL_SLOTS, "train", lang, mem_lang, sequicity, training)
-        train = get_seq(pair_train, lang, mem_lang, batch_size, True, sequicity)
-        nb_train_vocab = lang.n_words
+        train = get_seq(pair_train, lang, mem_lang, batch_size, True, sequicity) # train is actually a train_data_loader
+        # number of tokens in dict
+        num_train_vocab = lang.n_words
+
         pair_dev, dev_max_len, slot_dev = read_langs(file_dev, gating_dict, ALL_SLOTS, "dev", lang, mem_lang, sequicity, training)
-        dev   = get_seq(pair_dev, lang, mem_lang, eval_batch, False, sequicity)
+        dev = get_seq(pair_dev, lang, mem_lang, eval_batch, False, sequicity)
+
         pair_test, test_max_len, slot_test = read_langs(file_test, gating_dict, ALL_SLOTS, "test", lang, mem_lang, sequicity, training)
-        test  = get_seq(pair_test, lang, mem_lang, eval_batch, False, sequicity)
+        test = get_seq(pair_test, lang, mem_lang, eval_batch, False, sequicity)
+
         if os.path.exists(folder_name+lang_name) and os.path.exists(folder_name+mem_lang_name):
             print("[Info] Loading saved lang files...")
             with open(folder_name+lang_name, 'rb') as handle: 
@@ -430,24 +499,26 @@ def prepare_data_seq(training, task="dst", sequicity=0, batch_size=100):
         with open(folder_name+mem_lang_name, 'rb') as handle:
             mem_lang = pickle.load(handle)
 
-        pair_train, train_max_len, slot_train, train, nb_train_vocab = [], 0, {}, [], 0
+        pair_train, train_max_len, slot_train, train, num_train_vocab = [], 0, {}, [], 0
         pair_dev, dev_max_len, slot_dev = read_langs(file_dev, gating_dict, ALL_SLOTS, "dev", lang, mem_lang, sequicity, training)
         dev   = get_seq(pair_dev, lang, mem_lang, eval_batch, False, sequicity)
         pair_test, test_max_len, slot_test = read_langs(file_test, gating_dict, ALL_SLOTS, "test", lang, mem_lang, sequicity, training)
         test  = get_seq(pair_test, lang, mem_lang, eval_batch, False, sequicity)
 
+    #######
     test_4d = []
     if args['except_domain']!="":
         pair_test_4d, _, _ = read_langs(file_test, gating_dict, ALL_SLOTS, "dev", lang, mem_lang, sequicity, training)
-        test_4d  = get_seq(pair_test_4d, lang, mem_lang, eval_batch, False, sequicity)
-
+        test_4d = get_seq(pair_test_4d, lang, mem_lang, eval_batch, False, sequicity)
+    #######
+    '''max_word is useful in context encoder'''
     max_word = max(train_max_len, dev_max_len, test_max_len) + 1
 
     print("Read %s pairs train" % len(pair_train))
     print("Read %s pairs dev" % len(pair_dev))
     print("Read %s pairs test" % len(pair_test))  
     print("Vocab_size: %s " % lang.n_words)
-    print("Vocab_size Training %s" % nb_train_vocab )
+    print("Vocab_size Training %s" % num_train_vocab )
     print("Vocab_size Belief %s" % mem_lang.n_words )
     print("Max. length of dialog words for RNN: %s " % max_word)
     print("USE_CUDA={}".format(USE_CUDA))
@@ -458,7 +529,7 @@ def prepare_data_seq(training, task="dst", sequicity=0, batch_size=100):
     print("[Test Set Slots]: Number is {} in total".format(str(len(SLOTS_LIST[3]))))
     print(SLOTS_LIST[3])
     LANG = [lang, mem_lang]
-    return train, dev, test, test_4d, LANG, SLOTS_LIST, gating_dict, nb_train_vocab
+    return train, dev, test, test_4d, LANG, SLOTS_LIST, gating_dict, num_train_vocab
 
 
 

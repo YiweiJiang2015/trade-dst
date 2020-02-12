@@ -29,7 +29,7 @@ parser.add_argument('-all_vocab','--all_vocab', help='', required=False, default
 parser.add_argument('-imbsamp','--imbalance_sampler', help='', required=False, default=0, type=int)
 parser.add_argument('-data_ratio','--data_ratio', help='', required=False, default=100, type=int)
 parser.add_argument('-um','--unk_mask', help='mask out input token to UNK', type=int, required=False, default=1)
-parser.add_argument('-bsz','--batch', help='Batch_size', required=False, type=int)
+parser.add_argument('-bsz','--batch', help='Batch_size', required=False, type=int,default=11)
 
 # Testing Setting
 parser.add_argument('-rundev','--run_dev_testing', help='', required=False, default=0, type=int)
@@ -43,13 +43,14 @@ parser.add_argument('-eb','--eval_batch', help='Evaluation Batch_size', required
 parser.add_argument('-gate','--use_gate', help='', required=False, default=1, type=int)
 parser.add_argument('-le','--load_embedding', help='', required=False, default=0, type=int)
 parser.add_argument('-femb','--fix_embedding', help='', required=False, default=0, type=int)
+# todo what's parallel decoding?
 parser.add_argument('-paral','--parallel_decode', help='', required=False, default=0, type=int)
 
 # Model Hyper-Parameters
-parser.add_argument('-dec','--decoder', help='decoder model', required=False)
+parser.add_argument('-dec','--decoder', help='decoder model', required=False, default='TRADE')
 parser.add_argument('-hdd','--hidden', help='Hidden size', required=False, type=int, default=400)
-parser.add_argument('-lr','--learn', help='Learning Rate', required=False, type=float)
-parser.add_argument('-dr','--drop', help='Drop Out', required=False, type=float)
+parser.add_argument('-lr','--learn', help='Learning Rate', required=False, type=float,default=1e-3)
+parser.add_argument('-dr','--drop', help='Drop Out', required=False, type=float, default=0.2)
 parser.add_argument('-lm','--limit', help='Word Limit', required=False,default=-10000)
 parser.add_argument('-clip','--clip', help='gradient clipping', required=False, default=10, type=int) 
 parser.add_argument('-tfr','--teacher_forcing_ratio', help='teacher_forcing_ratio', type=float, required=False, default=0.5)
