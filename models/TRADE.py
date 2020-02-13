@@ -33,12 +33,12 @@ class TRADE(nn.Module):
         self.slots = slots[0]
         self.slot_temp = slots[2]
         self.gating_dict = gating_dict
-        self.nb_gate = len(gating_dict)
+        self.gate_dict_size = len(gating_dict)
         self.cross_entorpy = nn.CrossEntropyLoss()
 
         self.encoder = EncoderRNN(self.lang.n_words, hidden_size, self.dropout)
         self.decoder = Generator(self.lang, self.encoder.embedding, self.lang.n_words, hidden_size,
-                                 self.dropout, self.slots, self.nb_gate)
+                                 self.dropout, self.slots, self.gate_dict_size)
         
         if path:
             if USE_CUDA:
@@ -120,6 +120,7 @@ class TRADE(nn.Module):
 
     def encode_and_decode(self, data, use_teacher_forcing, slot_temp):
         # Build unknown mask for memory to encourage generalization
+        # default args['unk_mask']=1
         if args['unk_mask'] and self.decoder.training:
             story_size = data['context'].size()
             rand_mask = np.ones(story_size)
@@ -142,8 +143,8 @@ class TRADE(nn.Module):
         # todo 这句话需要好好理解
         max_res_len = data['generate_y'].size(2) if self.encoder.training else 10
         all_point_outputs, all_gate_outputs, words_point_out, words_class_out = self.decoder.forward(batch_size, \
-            encoded_hidden, encoded_outputs, data['context_len'], story, max_res_len, data['generate_y'], \
-            use_teacher_forcing, slot_temp) 
+            encoded_hidden, encoded_outputs, data['context_len'], story, max_res_len, \
+            data['generate_y'], use_teacher_forcing, slot_temp)
         return all_point_outputs, all_gate_outputs, words_point_out, words_class_out
 
     def evaluate(self, dev, matric_best, slot_temp, early_stop=None):
@@ -328,7 +329,7 @@ class EncoderRNN(nn.Module):
         hidden = self.get_state(input_seqs.size(1))
         if input_lengths:
             embedded = nn.utils.rnn.pack_padded_sequence(embedded, input_lengths, batch_first=False)
-        outputs, hidden = self.gru(embedded, hidden)
+        outputs, hidden = self.gru(embedded, hidden) # (seq_len, batch, num_directions * hidden_size)
         if input_lengths:
            outputs, _ = nn.utils.rnn.pad_packed_sequence(outputs, batch_first=False)   
         hidden = hidden[0] + hidden[1]
@@ -337,21 +338,21 @@ class EncoderRNN(nn.Module):
 
 
 class Generator(nn.Module):
-    def __init__(self, lang, shared_emb, vocab_size, hidden_size, dropout, slots, nb_gate):
+    def __init__(self, lang, shared_emb, vocab_size, hidden_size, dropout, slots, gate_dict_size):
         super(Generator, self).__init__()
         self.vocab_size = vocab_size
         self.lang = lang
         self.embedding = shared_emb 
         self.dropout_layer = nn.Dropout(dropout)
         self.gru = nn.GRU(hidden_size, hidden_size, dropout=dropout)
-        self.nb_gate = nb_gate
+        self.gate_dict_size = gate_dict_size
         self.hidden_size = hidden_size # todo hidden_size is different from TRADE model?
         self.W_ratio = nn.Linear(3*hidden_size, 1)
         self.softmax = nn.Softmax(dim=1)
         self.sigmoid = nn.Sigmoid()
         self.slots = slots
 
-        self.W_gate = nn.Linear(hidden_size, nb_gate)
+        self.W_gate = nn.Linear(hidden_size, gate_dict_size)
 
         # Create independent slot embeddings
         self.slot_w2i = {}
@@ -365,14 +366,21 @@ class Generator(nn.Module):
 
     def forward(self, batch_size, encoded_hidden, encoded_outputs, encoded_lens, story,
                 max_res_len, target_batches, use_teacher_forcing, slot_temp):
+        """
+        Paras:
+            story:
+            encoded_lens: data['context']
+            slot_temp: slot_train, slot_dev, slot_test (at most time, all of them are the same as SLOTS)
+        """
         all_point_outputs = torch.zeros(len(slot_temp), batch_size, max_res_len, self.vocab_size)
-        all_gate_outputs = torch.zeros(len(slot_temp), batch_size, self.nb_gate)
+        all_gate_outputs = torch.zeros(len(slot_temp), batch_size, self.gate_dict_size)
         if USE_CUDA: 
             all_point_outputs = all_point_outputs.cuda()
             all_gate_outputs = all_gate_outputs.cuda()
         
-        # Get the slot embedding 
-        slot_emb_dict = {}
+        # Get the slot embedding
+        # 因为slots数目固定，所以将其embedding之后的向量通过字典保存下来，方便抽取
+        slot_emb_dict = {} # todo why create a dict for slot?
         for i, slot in enumerate(slot_temp):
             # Domain embbeding
             if slot.split("-")[0] in self.slot_w2i.keys():
@@ -398,6 +406,7 @@ class Generator(nn.Module):
 
         if args["parallel_decode"]:
             # Compute pointer-generator output, putting all (domain, slot) in one batch
+            # todo may be useful for future!!
             decoder_input = self.dropout_layer(slot_emb_arr).view(-1, self.hidden_size) # (batch*|slot|) * emb
             hidden = encoded_hidden.repeat(1, len(slot_temp), 1) # 1 * (batch*|slot|) * emb
             words_point_out = [[] for i in range(len(slot_temp))]
@@ -413,7 +422,7 @@ class Generator(nn.Module):
                 if wi == 0: 
                     all_gate_outputs = torch.reshape(self.W_gate(context_vec), all_gate_outputs.size())
 
-                p_vocab = self.attend_vocab(self.embedding.weight, hidden.squeeze(0))
+                p_vocab = self.attend_vocab(self.embedding.weight, hidden.squeeze(0)) # embedding is shared with encoder module
                 p_gen_vec = torch.cat([dec_state.squeeze(0), context_vec, decoder_input], -1)
                 vocab_pointer_switches = self.sigmoid(self.W_ratio(p_gen_vec))
                 p_context_ptr = torch.zeros(p_vocab.size())
@@ -451,7 +460,7 @@ class Generator(nn.Module):
                     # gru is not GRUCell, it's GRU layer
                     dec_state, hidden = self.gru(decoder_input.expand_as(hidden), hidden) # expand_as用的好
                     context_vec, logits, prob = self.attend(encoded_outputs, hidden.squeeze(0), encoded_lens) # encoded_lens?
-                    if wi == 0: 
+                    if wi == 0: # 只有初始位置的解码结果才被记录到gate_outputs
                         all_gate_outputs[counter] = self.W_gate(context_vec)
                     p_vocab = self.attend_vocab(self.embedding.weight, hidden.squeeze(0))
                     p_gen_vec = torch.cat([dec_state.squeeze(0), context_vec, decoder_input], -1)
@@ -471,7 +480,7 @@ class Generator(nn.Module):
                         decoder_input = self.embedding(pred_word)   
                     if USE_CUDA: decoder_input = decoder_input.cuda()
                 counter += 1
-                words_point_out.append(words)
+                words_point_out.append(words) # contains generated words for each slot pair
         
         return all_point_outputs, all_gate_outputs, words_point_out, []
 

@@ -166,8 +166,10 @@ def collate_fn(data):
 
     def pad_multi_response(sequences):
         '''
-        convert from (batch * num_slot * slot_len) to (batch * num_slot * max_slot_len)
-        Normally, slot_len is 2 because of "None+[EOS]"
+        Return:
+            padded_seqs: convert from (bsz, num_slot, slot_len) to (bsz, num_slot, max_slot_len)
+                         For most cases, slot_len is 2 because of "None+[EOS]"
+            lengths: list of original length before padding. size (bsz, num_slot)
         '''
         lengths = []
         for bsz_seq in sequences:
@@ -235,7 +237,8 @@ def read_langs(file_name, gating_dict, SLOTS, dataset, lang, mem_lang, sequicity
         data: list of dicts, each element (one dict) is an abstract of each turn of all the dialogs.
               So the content is very redundant. See line 322.
         max_resp_len: the maximum length of dialog history
-        slot_temp: slot_temp is different from SLOTS if we only do experiments on specific domains
+        slot_temp: The same as SLOTS in most conditions. slot_temp is different from SLOTS
+                   ONLY when we do experiments on specific domains
 
     """
     print(("Reading from {}".format(file_name)))
